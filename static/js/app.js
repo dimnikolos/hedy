@@ -1,80 +1,83 @@
-var editor = ace.edit("editor");
-editor.setTheme("ace/theme/monokai");
-// editor.session.setMode("ace/mode/javascript");
+(function() {
+  var editor = ace.edit("editor");
+  editor.setTheme("ace/theme/monokai");
+  // editor.session.setMode("ace/mode/javascript");
 
-// Here's everything you need to run a python program in skulpt
-// grab the code from your textarea
-// get a reference to your pre element for output
-// configure the output function
-// call Sk.importMainWithBody()
+  // Load existing code from session, if it exists
+  const storage = window.sessionStorage;
+  if (storage) {
+    const level = queryParam('level') || '1';
+    const levelKey = 'level_' + level + '_code';
 
-function print_demo(level) {
+    // On page load, if we have a saved program, load it
+    if (storage.getItem(levelKey)) {
+      editor.setValue(storage.getItem(levelKey), 1);
+    }
 
-  if (level == 1 || level == 2){
-    var editor = ace.edit("editor");
-    editor.setValue("print Hallo welkom bij Hedy!");
+    // When the user exits the editor, save what we have.
+    editor.on('blur', function(e) {
+      storage.setItem(levelKey, editor.getValue());
+    });
   }
+})();
 
+function goto(level, lang) {
+    window.location.href = buildUrl('/', {
+      level: level,
+      lang: lang
+    });
 }
 
-function is_demo(level) {
-  if (level == 1){
-    console.log('A demo is tried for is at a level where it is not yet available');
-  }
-  if (level == 2){
-      var editor = ace.edit("editor");
-      editor.setValue("naam is Hedy");
-  }
-}
-
-function echo_demo(level) {
-  if (level == 1 || level == 2){
-    var editor = ace.edit("editor");
-    editor.setValue("ask Wat is je lievelingskleur?\necho je lievelingskleur is");
-  }
-}
-
-function ask_demo(level) {
-  if (level == 1 || level == 2){
-    var editor = ace.edit("editor");
-    editor.setValue("ask Wat is je lievelingskleur?");
-  }
-}
-
-function goto(level) {
-    window.location.href = '/?level=' + level.toString();
-    console.log('going to' + '/level=' + level.toString());
-}
-
-function runit(level) {
+function runit(level, lang) {
   error.hide();
   try {
-    // var prog = document.getElementById("editor").value;
-
+    level = level.toString();
     var editor = ace.edit("editor");
-    var prog = editor.getValue();
+    var code = editor.getValue();
 
-    console.log('Origineel programma:\n', prog);
+    console.log('Original program:\n', code);
 
     $.getJSON('/parse/', {
-      level: level.toString(),
-      code: prog,
+      level: level,
+      code: code,
+      lang: lang
     }).done(function(response) {
       console.log('Response', response);
       if (response.Error) {
-        error.show('De server kon het programma niet vertalen', response.Error);
-      } else {
-        runPythonProgram(response.Code);
+        error.show(ErrorMessages.Transpile_error, response.Error);
+        return;
       }
+
+      runPythonProgram(response.Code).catch(function(err) {
+        error.show(ErrorMessages.Execute_error, err.message);
+        reportClientError(level, code, err.message);
+      });
     }).fail(function(err) {
       console.error(err);
-      error.show('We konden niet goed met de server praten', JSON.stringify(err));
+      error.show(ErrorMessages.Connection_error, JSON.stringify(err));
     });
 
   } catch (e) {
     console.error(e);
-    error.show('Misschien hebben wij een klein programmeerfoutje gemaakt', e.message);
+    error.show(ErrorMessages.Other_error, e.message);
   }
+}
+
+/**
+ * Do a POST with the error to the server so we can log it
+ */
+function reportClientError(level, code, client_error) {
+  $.ajax({
+    type: 'POST',
+    url: '/report_error',
+    data: JSON.stringify({
+      level: level,
+      code: code,
+      client_error: client_error,
+    }),
+    contentType: 'application/json',
+    dataType: 'json'
+  });
 }
 
 function runPythonProgram(code) {
@@ -87,16 +90,33 @@ function runPythonProgram(code) {
     read: builtinRead,
     inputfun: inputFromInlineModal,
     inputfunTakesPrompt: true,
+    __future__: Sk.python3
   });
 
-  Sk.misceval.asyncToPromise(function () {
+  return Sk.misceval.asyncToPromise(function () {
     return Sk.importMainWithBody("<stdin>", false, code, true);
   }).then(function(mod) {
-    console.log('Programma klaar');
+    console.log('Program executed');
   }).catch(function(err) {
+    // Extract error message from error
     console.log(err);
-    addToOutput(JSON.stringify(err), 'red');
+    const errorMessage = errorMessageFromSkulptError(err) || JSON.stringify(err);
+    throw new Error(errorMessage);
   });
+
+  /**
+   * Get the error messages from a Skulpt error
+   *
+   * They look like this:
+   *
+   * {"args":{"v":[{"v":"name 'name' is not defined"}]},"traceback":[{"lineno":3,"colno":0,"filename":"<stdin>.py"}]}
+   *
+   * Don't know why, so let's be defensive about it.
+   */
+  function errorMessageFromSkulptError(err) {
+    const message = err.args && err.args.v && err.args.v[0] && err.args.v[0].v;
+    return message;
+  }
 
   function addToOutput(text, color) {
     $('<span>').text(text).css({ color }).appendTo(outputDiv);
@@ -139,24 +159,6 @@ function runPythonProgram(code) {
     });
   }
 
-  function inputFromModal(prompt) {
-    return new Promise(function(ok) {
-      const input = $('#ask-modal input[type="text"]');
-      $('#ask-modal .caption').text(prompt);
-      input.val('');
-      setTimeout(function() {
-        input.focus();
-      }, 0);
-      $('#ask-modal form').one('submit', function(event) {
-        event.preventDefault();
-        $('#ask-modal').hide();
-        ok(input.val());
-        return false;
-      });
-      $('#ask-modal').show();
-    });
-  }
-
   function inputFromInlineModal(prompt) {
     return new Promise(function(ok) {
       const input = $('#inline-modal input[type="text"]');
@@ -187,3 +189,19 @@ var error = {
     $('#errorbox').show();
   }
 };
+
+function queryParam(param) {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get(param);
+}
+
+function buildUrl(url, params) {
+  const clauses = [];
+  for (let key in params) {
+    const value = params[key];
+    if (value !== undefined && value !== '') {
+      clauses.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
+    }
+  }
+  return url + (clauses.length > 0 ? '?' + clauses.join('&') : '');
+}
